@@ -1,0 +1,314 @@
+
+	
+Databases
+A single Postgres instance can serve several databases at a time; together they are called a database cluster / The directory that contains all the files related to the cluster is usually called PGDATA 
+PGDATA contains 3 identical databases: 
+	• Template0 : Used restoring data from a logical backup or creating a database with a different encoding
+	• Template1 : template for all the other databases that a user can create in the cluster.
+	• postgres is a regular database that you can use at your discretion.
+
+System Catalog: Metadata of all cluster objects (such as tables, indexes, data types, or functions) is stored in tables that belong to the system catalog. There are objects exclusively for database and also common for the cluster
+	• Can be modified using DDL. 
+	• Names start with pg_%
+	• Primary key is OID 
+
+Schema: public, pg_catalog, information_Schema , pg_toast and pg_temp
+
+Tablespaces: 
+	• table spaces define physical data layout. A tablespace is virtually a directory in a file system
+	• One and the same tablespace can be used by different databases. each database can be store data on several Tablespaces. It means that logical structure and physical data layout do not depend on each other. Default tablespace, All database objects created in the default unless specified other tablespace
+	• Each tablespace directory (except for pg_global) contains separate subdirectories for particular databases. All objects belonging to same DB stored here.
+	• During initialization, pg_default(PGDATA/base directory) and pg_global( PGDATA\global: stores system catalog objects) are created.
+	
+Custom TableSpace: When creating custom tablespace, directory can be specified, Postgresql will create a symbolic link to this location in the PGDATA/pg_tblspc directory
+Relation: Table
+
+Files and Fork: 
+	• a fork is represented by a single file, The file grows over time, and when its size reaches 1GB(set to support various file systems), another file of this fork is created (such files are sometimes called segments).
+	• Ä single relation on file system can be represented by several files.
+	• Main fork: available for all except views : Files of the main fork are named by their numeric IDs,
+		○ pg_relation_filepath
+	• The initialization fork1: Available for unlogged tables.(any actions performed on them are not written into the write ahead log). Which makes operation fast. The postgres simply deletes all forks of such objects during recovery and overwrites the main fork with initialization fork. The name will be same as MAIN FORK but with suffice _INIT
+
+Free space map : keeps track of available space within pages. Used mainly in inserts. Files related to it will have _fsm suffix. Provided to both tables and indexes. 
+The Visibility map : can quickly show whether a page needs to be vacuumed or frozen. two bits for each table page. Pages will be with _vm suffix
+Pages :  Also called blocks ,08KB size, can be configured to 32KB using configure option. Pages are first moved to the buffer cache and flushed back to disk
+
+TOAST(The Oversized Attributes Storage Technique) : mainly for rows which are bigger than block size (08KB). The threshold value is 2000 bytes can be redefined at the table level using the toast_tuple_target storage parameter.
+Mechanism:
+	• Plain
+	• Main : Compress
+	• Extended : or can be both compress and slice
+	• External : Separate toast table Slice 
+	• Example: if a table has a column of the numeric or text type, a table will be created even if this column will never store any long values.
+it has its own versioning that does not depend on row versions of the main table. They are never updated. Either inserted or Deleted. Each data modification results in creation of a new tuple in the main table
+
+
+Process and Memory
+	• Postmaster: First process , Which starts all other processes. This model has drawbacks 
+		○ static shared memory allocation does not allow resizing structures like buffer cache on the fly
+		○ Parallel algorithms cannot be implemented / sessions are tightly bound to processes
+		○ Functions:
+			§ Listen incoming connections and spawn a backend process/ Each connection can have one OS process . Multiple connection can create problem for RAM /cache memory. This can be solved by using connection pooling(pgbouncer, odyssey)
+	• Switching to thread model could help but it has issues related to isolation, OS compatibility and resource management
+	• wal writer writes WAL entries to disk.
+	• autovacuum removes stale data from tables and indexes
+	• writer flushes dirty pages to disk
+	• stats collector collects usage statistics for the instance.
+	• wal sender sends WAL entries to a replica.
+	• wal receiver gets  WAL  entries on a replica
+	• enable process interaction, postmaster allocates shared memory, which is available to all the processes.
+	
+Isolation: 
+the more locks a transaction acquires, the better it is isolated from other transactions. And consequently, the worse is the system performance.
+Multiversion concurrency control implies that at any moment the database system can contain several versions of one and the same row, so Postgres can include an appropriate version into the snapshot rather than abort transactions that attempt to read stale data. Dirty reads are not possible
+
+
+Data consistency: it offers common table expressions (􀔟􀔰􀔡) that can contain operators like Insert, Update and Delete as well as the insert on conflict
+operator that implements the following logic: insert the row if it does not exist, otherwise perform an update.
+	• Apply explicit locks but it nullifies the advantage of MVCC
+Read Skew: Anomaly in reading the data,  if two transactions update one and the same row at the Read Committed level, it can cause the read skew anomaly:
+Repeatable read - This is a stricter isolation level than read commited in that data committed by other quicker concurrent transactions will not be seen by the current transaction. Thus the data it reads may become out-of-date. If it tries to write to data has already been committed in a quicker, concurrent transaction then an error will be throw .
+Serializable - This is the strictest isolation level. In this level, it's as if transactions are executed serially instead of concurrently, thus ensuring maximum data integrity guarantees
+
+Repeatable Read and Serializable levels, a snapshot is taken at the beginning of the first statement of a transaction, and it remains active until the whole
+transaction is complete.
+
+Read Committed : Snapshot of the rows taken at the beginning of each statement. It is valid till the statement
+
+
+Pages and Tupples
+Page structure: 
+Page header: lowest address, Stores checksum and sizes of all parts of all other parts of the page.
+Special Place: Used by Indexes to save 
+Tuples: Actual rows/ Due to MVCC there can be multiple version of rows.
+Item Pointers: Table of contents of page. Each page has tuple identifiers(TIDs). It consists page number and reference to the particular row version located in the page. TID has 
+	• Tupple offset
+	• Tupple length
+	• Tuple status
+
+
+
+
+Row Version and Layout: Row header + data 
+Row header: XMIN, XMAX used to differentiate between versions of the row.
+Infomask: Version properties
+Ctid : pointer to next version of the row
+
+	• Data layout on Disk is fully coincide with RAM. The page along with its tuples read and stored on a buffer cache
+	• When row is created XMIN set to transactionID of INSERT
+	• When row is deleted, the xmax value of its current version set to transaction id of the delete command.
+	• Update: DELETE and INSERT, First the xmax value of the current transaction is set to the txn id of update command. Then a new version of row is created with its new XMIN value will be same as XMAX value of previous version
+	• DELETE: When a row is deleted, the xmax field of its current version is set to the transaction ID that performs the deletion, and the xmax_aborted bit is unset. the xmax value serves as a row lock until this transaction is active.
+CLOG: Commit log structure in shared memory, Once the txn is committed. its status has to be stored. PostgrSQL employs a special CLOG (commit log) structure.
+	• stored as files in the PGDATA/pg_xact directory rather than as a system catalog table. Clog split into several files. It has  2 bits for every transaction to tell the status of Committed or Aborted
+	• When PostgreSQL shuts down or whenever the checkpoint process runs, the data of the clog are written into files stored under the pg_xact subdirectory.When PostgreSQL starts up, the data stored in the pg_xact's files are loaded to initialize the clog.
+	• When any other transaction is accessed the the heap(table). It checks if XMIN finished if not, It will check the active transaction.
+	• PROCARRAY:structure located in the shared memory of the instance to check if transaction is active.
+	• Performing this check everytime is very expensive. The transaction status is written into tuple header as min_committed, xmin_aborted. Which will be used as hint bits.
+INDEXs: 
+	• Don't use row versioning. Point to all versions of the row in a table. To figure out which row version is visible, transactions have to access the table
+Virtual Transactions
+	• To save txn ids , Postgresql uses the virtual xid(backend process id + sequential Number) virtual Txnids exist only in RAM, andonly while the corresponding transactions are active; they are never written into data pages and never get to disk.
+
+Subtransactions
+	• Savepoints canceling some of the operations within a transaction without aborting this transaction as a whole. They exists in transactions 
+	• Subtransactions have their own txnIDs 
+	• status of a subtransaction is written into CLOG in the usual manner; The final decision depends on the status of the main transaction: if it is aborted, all its subtransactions will be considered aborted too.
+	• information about subtransactions is stored under the PG_DATA/pg_subtrans directory
+	
+Snapshots:
+Visible version of all different rows called as snapshot. snapshot is not a physical copy of all the required tuples. It is determined by XMIN and XMAX
+
+create a snapshot, it is not enough to register the moment when it was taken: it is also necessary to collect the status of all the transactions at that moment. Otherwise, later it will be impossible to understand which tuples must be visible in the snapshot, and which must be excluded.
+xmin is the snapshot’s lower boundary, which is represented by the ID of the oldest active transaction.
+Xmax 
+Xp_list: List of active transactions. |SELECT pg_current_snapshot();
+
+Visibility of Transactions’ Own Changes: To define visibility rules for own transactions. In Postgres, tuple headers provide a special field (displayed as
+Cmin(INSERTION) and cmax(DELETION) pseudocolumns). Both are stored in same column to save space. Used mainly in CURSORS
+
+Transaction or Database Horizon:Minimum xmin at database or table level below the xmin no tuples will be visible
+
+System catalog uses separate transactions. / We can export the snapshot and set the context for the snapshot also.
+
+Page Pruning:
+Its happens at the time of SELECT and UPDATE operations. Postgres actually cleanup or aggregate the free space into single continuous chunk.
+When does it happens:
+	• The previous Update operation did not find enough space to place a new tuple into the same page
+	• The heap page contains more data than allowed by the fillfactor storage parameter
+	• But the references to Index pages are not moved they are moved when index pages are accessed.
+
+Hot Updates
+	• Row modification triggers all indexes to include the references. if the updated column is not a part of any index, there is no point in creating another index entry that contains the same key value. To avoid such redundancies, Postgresql provides an optimization called Heap-Only Tuple updates
+	• In such updates an index page contains only one entry for each row and it points to very first version all other versions are bound by CTID pointers
+	• Such row in heap is tagged with HEAP HOT updated bit, It means while reading it should continue to scan
+	• HOT chain can grow only within a single page, traversing the whole chain never requires access to other pages and thus does not hamper performance
+Page Pruning for HOT Updates
+HOT Chain Splits: If the page has no more space to accommodate a new tuple, the chain will be cut off. Postgresql will have to add a separate index entry to refer to the tuple located in another page.
+
+Index Pruning: happens when an insertion into a 􀔞-tree is about to split the page into two as original page doesnot have enough space. Even if index entries deleted. Index pages cannot be merged , it cause bloating. Bloating cann't be removed even if we delete large data. By Pruning page split can be avoided. While pruning entries tagged as dead are removed
+If no tuples are known to be dead, Postgres checks those index entries that reference different versions of one and the same table row
+
+VACUUM and AUTOVACUUM
+It processes the whole table and eliminates both outdated heap tuples and all the corresponding index entries
+	• Can be performed in parallel with other processes in the database system
+	• Table and Indexes can be used in normal manner for select and Insert operation.
+	• concurrent execution of such commands as CREATE INDEX or ALTER INDEX and some others is not allowed
+	• It uses visibility map to skip the pages which does not contain dead tuples. a page will only be vacuumed if it does not appear in this map
+	• The free space map also gets updated to reflect the space that has been cleared
+	Pointers with the unused status are treated as free and can be reused by new row versions
+	• VACUUM does not remove the deadtuples which are still in active transaction as database horizen transaction
+2 Types:
+	Concurrent VACUUM  : removes dead tuples for each page of the table file, and other transactions can read the table while this process is running
+	Full VACUUM : removes dead tuples and defragments live tuples the whole file, and other transactions cannot access tables while Full VACUUM is running
+	
+Pseudocode:
+(1)  FOR each table
+(2)       Acquire ShareUpdateExclusiveLock lock for the target table
+/* The first block */
+(3)       Scan all pages to get all dead tuples, and freeze old tuples if necessary 
+(4)       Remove the index tuples that point to the respective dead tuples if exists
+/* The second block */
+(5)       FOR each page of the table
+(6)            Remove the dead tuples, and Reallocate the live tuples in the page
+(7)            Update FSM and VM
+           END FOR
+/* The third block */
+(8)       Clean up indexes
+(9)       Truncate the last page if possible
+(10       Update both the statistics and system catalogs of the target table
+           Release ShareUpdateExclusiveLock lock
+       END FOR
+/* Post-processing */
+(11)  Update statistics and system catalogs
+(12)  Remove both unnecessary files and pages of the clog if possible
+
+VACUUM PHASES : Will be done in parallel for Both index and tables. First it will be done on Index then on Table.
+	• Heap Scan: Visibility Map (Skipped from vacuuming) 
+		○ If a tuple is beyond the horizon and is not required anymore, its ID is added to a special tid array. Such tuples cannot be removed
+		yet because they may still be referenced from indexes
+		○ size of the 64MB allocated memory chunk is defined by the maintenance_work_mem parameter
+
+	• Index Vacuuming: It has TID array now, It starts finding(Scanning as there is no way to quickly find an index entry by the corresponding tuple ID) references of the TID in the Index pages. 
+		○ One Index can be processed by 1 Worker
+		○ During this phase,  Postgresql updates the free space map and calculates statistics on vacuuming. index vacuuming phase leaves no references to outdated heap tuples in indexes,but the tuples themselves are still present in the table
+	• Heap Vacuuming : The table is scanned again to remove the tuples registered in the tid array and free the corresponding pointers as now all the references are removed from Index vacuuming. space recovered by VACUUM is reflected in the free space map
+	• Heap Truncation: Heap truncation requires a short exclusive lock on the table. To avoid holding other processes for too long, attempts to acquire a lock do not exceed five seconds
+		○ Since the table has to be locked, truncation is only performed if the empty tail takes at least 1/16th of the table or has reached the length of 1000 pages. These thresholds are hardcoded and cannot be configured.track_counts parameter is enabled
+	
+AutoVacuum 
+	• the autovacuum launcher process is always running in the system. autovacuum schedule and maintains the list of “active” databases based on usage statistics. There are N number of worker threads for N number of databases But cann't exceed autovacuum_max_workers. Spin in at every 1 minutes
+	• Background workers connect DB and build list of all tables, materialized views, and TOAST tables to be vacuumed
+	• the list of all tables and materialized views to be analyzed
+	• How different from Manual Vacuum:
+		○ Postgresql provides a separate memory limit for autovacuum processes, which is defined by the autovacuum_work_mem parameter.
+		○ If worker fails to complete its scheduled tasks in same time. Parallel workers can be scheduled but there won't be parallel worker at table level.
+Autovacuum Thresholds:
+	• autovacuum_vacuum_threshold: 50 dead tuples / autovacuum_vacuum_scale_factor, : Fraction of dead tuples = 0.2
+pg_stat_all_tables.n_dead_tup > autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × pg_class.reltuples
+
+	• If rows are only inserted then also it needs to be vaccumed.
+	pg_stat_all_tables.n_ins_since_vacuum > autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × pg_class.reltuples
+	
+Index and table Rebuild
+	• After vacuuming space will be returned to OS only when pages are located at the end of the file.
+An excessive size can lead to unpleasant consequences:
+	• Full table (or index) scan will take longer.
+	• A bigger buffer cache may be required (pages are cached as a whole, so data density decreases).
+	• B-trees can get an extra level, which slows down index access.
+	• Files take up extra space on disk and in backups
+With full vacuum it rebuilds entire index taking into account of fill factor. This blocks access to table and index. It requires lot of free space.
+
+		
+ANALYSYS:
+	• gathering statistical information for the query planner/ manually using the ANALYZE command or combine it with vacuuming by calling VACUUM ANALYZE.
+Transaction ID Wraparound
+	• 32Bit TID --> If exhausted , Counter to be reset to start called wraparound. Postgres did not use 64 bit because, it will fill up the data pages space.
+
+Buffer Cache: OS will have caching, Database systems will have caching, Postgres avoids double caching. Postgre􀔰􀔮􀔩 will use direct memory access (DMA) instead of copying buffered pages into the 􀔬􀔰 address space; besides, you will gain immediate control over physical writes on disk.
+	• It uses large part of shared memory and accessible to all processes. Its mainly a set of buffers which are nothing but a memory chunk to hold a page and its header
+		○ The header has : page's physical location, Dirty page details. Buffer count
+	• When a process requests a page in buffer it receives its ID and process reads/modifies and save it in buffer, When the page is in used its pinned. Each access increases its usage count
+	• If its pinned , No modifications are allowed.
+	• Buffer cache size is 128MB by default. It can be changed using shared_buffer parameter. typical recommendation is to start with 1/4th of RAM and then adjust this setting as required.
+
+Cache Miss:
+A cache miss requires the system or application to make a second attempt to locate the data, this time against the slower main database. If the data is found in the main database, the data is then typically copied into the cache in anticipation of another near-future request for that same data.
+
+To evict the pages postgres uses CLOCK SWEEP ALGORITHM, Pointing to one of the buffers, the clock hand starts going around the buffer cache and reduces the usage count for each cached page by one as it passes. The first unpinned buffer with the zero count found by the clock hand will be cleared.
+The usage count is incremented each time the buffer is accessed (that is, pinned), and reduced when the buffer manager is searching for pages to evict. Maximum usage count is set to 5
+
+Once the buffer to evict is found, the reference to the page that is still in this buffer must be removed from the hash table. But if this buffer is dirty, that is, it contains some modified data, the old page cannot be simply thrown away—the buffer manager has to write it to disk first.
+
+Buffer Eviction
+	• A buffer ring of a particular size consists of an array of buffers that are used one after another. At first, the buffer ring is empty, and individual buffers join it one by one, after being selected from the buffer cache in the usual manner
+	• 3 Strategies:
+		○ Bulk reads strategy is used for sequential scans of large tables if their size exceeds 1/4th of the buffer cache This strategy does not allow writing dirty pages to disk to free a buffer; instead, the buffer is excluded from the ring and replaced by another one. As a result, reading does not have to wait for writing to complete, so it is performed faster
+Pg_buffercache extention is used to capture the buffer usage on postgres
+
+Local Cache: Since temporary data is visible to a single process only, there is no point in loading it into the shared buffer cache. Therefore, temporary data uses the local cache of the process that owns the table
+It works similar to shared cache.
+		○ Page search is performed via a hash table./Eviction follows the standard algorithm/Pages can be pinned to avoid eviction
+
+WRITE AHEAD LOGGING
+A log entry related to a page modification must be written to disk ahead of the modified page itself. Hence the name of the log: write-ahead log, or WAL . WAL entries constitute a continuous stream of data
+Below operations logged:
+	• Page modifications  performed in the buffer cache—since writes are deferred
+	• transaction commits and rollbacks—since the status change happens in CLOG buffers and does not make it to disk right away
+	• file operations (Creation/Deletion of files/directories when the tables are removed or added)
+Not logged operations:
+	• UNLOGGED tables.
+	• Temp tables
+
+WAL levels:
+	• Minimal : Guarantees crash recovery. Instead of being logged, all the required data is immediately flushed to disk, and system catalog changes
+	become visible right after the transaction commit. 
+		○ If operation is interrupted by failure, The data consistency does not affect.
+		○ wal_skip_threshold parameter 2MB default
+		○ If you choose the minimal level, you also have to set the allowed number of walsender 10 processes to zero in the max_wal_senders parameter
+		
+	• Replica : The ability to perform data recovery from a backup and use physical replication is guaranteed at the replica level
+	• Logical
+Structure: Log entries(TXN ID, Resource manager that interprets the entry, Checksum, Reference to Previous WAL), They generally scanned in forward direction, with utilities like pg_rewind they can be scanned backward.
+	• WAL is stored in the PG_DATA/pg_wal directory as separate files
+	• WAL size can be mentioned initdb --wal-segsize
+
+WAL files take up special buffers in the server’s shared memory. The size of the cache used by WAL is defined by the wal_buffers parameter. By default, The size is  1/32 of the total buffer cache size. 
+It usually works in ring buffer mode. New entry added to its head and tail entries will get write to disks. If WAL cache is too small, disk synchronization will be performed more often than necessary.
+WAL size can grow more than max_wal_size as if pending transactions not flushed there will growth of WAL size
+
+There Is only one WAL for the whole database cluster. New entries for all databases can get appended to it. A commit updates transaction status in CLOG pages
+If you know two LSN positions are known,  size of WAL entries between them (in bytes) by simply subtracting one position from the other
+
+WAL MODES
+	• Synchronous: Default, forbids any further operations until a transaction commit saves all the related WAL entries to disk. It is a lot like holding doors of an elevator for someone to rush in. the backend that completes the transaction and writes WAL entries to disk can make a small pause as defined by the commit_delay parameeter(0). ACID’s durability requirement is guaranteed—the transaction is considered to be reliably committed. Can result in longer latency. Not recommended incase of short OLTP transactions
+	• Asynchronous: asynchronous mode implies instant transaction commits, with WAL entries being written to disk later in the background(WAL writer process) duration of pauses is 200ms defined by the wal_writer_delay value. Synchronization is performed each time the wal_writer_flush_after  mount of 1MB data is written, and once again at the end of the writing cycle.
+		○ Faster as they don't have to wait for for physical writes to disk. The data delay can happen up to 3X wal_writer_delay
+	• these two modes complement each other. In the synchronous mode,WAL entries related to a long transaction can still be written asynchronously
+	to free WAL buffers. And vice versa, a WAL entry related to a page that is about to be evicted from the buffer cache will be immediately flushed to disk even in the asynchronous mode
+	
+
+Checkpoint: By checkpointer process,
+	• Checkpoint Start: Flushes from WAL buffer to DISK(CLOG transaction status, Sub transaction metadata )
+	• Checkpoint Execution:  Flushing dirty pages to disk.  pages can still be modified in the buffer cache while the checkpoint is in progress. But since new dirty buffers are not tagged, checkpointer will ignore them.
+	• Checkpoint completion : All dirty pages are flushed to disk , From now on (but not earlier!), the start of the checkpoint will be used as a new
+	starting point of recovery. All the WAL entries written before this point are not required anymore.
+	• The PG_DATA/global/pg_control file also gets updated to refer to the latest completed checkpoint.
+	• The log_checkpoints parameter enables printing checkpoint-related information into the server log
+	
+Recovery : When postgres starts it launches postmaster,  the startup process reads the pg_control file and checks the cluster status.
+	• Clean shutdown has "Shut down" status. "in production" indicates the failure. If the PG_DATA directory contains a backup_label file related to a backup, the start LSN position is taken from that file.
+	• The process takes wal entries sequentially and apply the LSN. the recovery process consists of two phases. In the roll-forward phase, WAL entries are replayed, repeating the lost operations. In the roll-back phase, the server aborts the transactions that were not yet committed at the time of the failure. In Postgres, the second phase is not required. After the recovery, the CLOG will contain neither commit nor abort bits for an unfinished transaction (which technically denotes an active transaction), but since it is known for sure that the transaction is not running anymore, it will be considered aborted.
+Bgwriter to write from buffer to DISK, Uses same algorigthm clock sweep. "The bgwriter process uses its own clock hand that never lags", As the buffers are being traversed, the usage count is not reduced. A dirty page is flushed to disk if the buffer is not pinned and has zero usage count.
+During its operation, bgwriter makes periodic pauses, sleeping for bgwriter_delay  200ms units of time.
+
+
+The checkpoint duration is defined by checkpoint_completion_target parameter. Its value specifies 0.9 the fraction of time between the starts of two neighboring checkpoints that is allotted to writing. One checkpoint can start before the other completes. Checkpoint timeout is 5mins checkpoint_timeout parameter value
+When does the checkpoint happen:
+	• Checkpoint_flush_after: after N pages.
+	• Checkpoint_timeout: Time
+
+Data Corrruption: Is handled by pg_checksum utility, It can be run when the server is in stopped state.
+
+
